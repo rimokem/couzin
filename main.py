@@ -8,6 +8,18 @@ from matplotlib.animation import FuncAnimation
 from numpy.typing import NDArray
 
 
+def normalize(vector: NDArray[np.float64]) -> NDArray[np.float64]:
+    norm = np.linalg.norm(vector)
+    if norm == 0:
+        return vector
+    return vector / norm
+
+
+class AgentType(Enum):
+    PREY = 1
+    PREDATOR = 2
+
+
 class AgentConfig:
     zor: float  # Zone of Repulsion (斥力)
     zoo: float  # Zone of Orientation (整列)
@@ -41,11 +53,6 @@ class AgentConfig:
         self.noise_sd = noise_sd
 
 
-class AgentType(Enum):
-    PREY = 1
-    PREDATOR = 2
-
-
 class Agent:
     id: int
     type: AgentType
@@ -72,8 +79,8 @@ class Agent:
             raise ValueError("`v` must be a (2,1) ndarray")
         self.config = config
 
-    def update(self, agents: list[Agent], dt: float) -> None:
-        self._move(agents, dt)
+    def update(self, agents: list[Agent], dt: float, boundary: float) -> None:
+        self._move(agents, dt, boundary)
 
     def _calc_direction(self, agents: list[Agent]) -> NDArray[np.float64]:
         zoa_peers: list[Agent] = []
@@ -138,7 +145,6 @@ class Agent:
     def _in_fov(self, other: Agent) -> bool:
         direction_to_other = normalize(other.pos - self.pos)
         current_direction = normalize(self.v)
-        print((direction_to_other, current_direction))
 
         dot_product = np.dot(current_direction.T, direction_to_other).item()
         angle = np.arccos(np.clip(dot_product, -1.0, 1.0)) * (180.0 / np.pi)
@@ -155,7 +161,7 @@ class Agent:
         new_direction = direction * np.cos(angle_error) + noise * np.sin(angle_error)
         return normalize(new_direction)
 
-    def _move(self, agents: list[Agent], dt: float) -> None:
+    def _move(self, agents: list[Agent], dt: float, boundary: float) -> None:
         direction = self._calc_direction(agents)
         direction = self._add_noise(direction)
         # 方向がturn_rateを超えている場合、directionを調整
@@ -172,12 +178,19 @@ class Agent:
         self.v = direction * self.config.speed
         self.pos += self.v * dt
 
+        if self.pos[0, 0] < 0:
+            self.pos[0, 0] = 0
+            self.v[0, 0] *= -1
+        elif self.pos[0, 0] > boundary:
+            self.pos[0, 0] = boundary
+            self.v[0, 0] *= -1
 
-def normalize(vector: NDArray[np.float64]) -> NDArray[np.float64]:
-    norm = np.linalg.norm(vector)
-    if norm == 0:
-        return vector
-    return vector / norm
+        if self.pos[1, 0] < 0:
+            self.pos[1, 0] = 0
+            self.v[1, 0] *= -1
+        elif self.pos[1, 0] > boundary:
+            self.pos[1, 0] = boundary
+            self.v[1, 0] *= -1
 
 
 class SimulationConfig:
@@ -219,7 +232,7 @@ class Simulation:
 
     def _add_agents(self):
         for _ in range(self.config.prey_count):
-            pos = np.random.rand(2, 1) * self.config.boundary_size
+            pos = np.random.rand(2, 1) * self.config.boundary_size * 0.25
             angle = np.random.rand() * 2 * np.pi
             v = (
                 np.array([[np.cos(angle)], [np.sin(angle)]])
@@ -234,7 +247,7 @@ class Simulation:
             )
             self.agents.append(agent)
         for _ in range(self.config.predator_count):
-            pos = np.random.rand(2, 1) * self.config.boundary_size
+            pos = (np.random.rand(2, 1) * 0.3 + 0.7) * self.config.boundary_size
             angle = np.random.rand() * 2 * np.pi
             v = (
                 np.array([[np.cos(angle)], [np.sin(angle)]])
@@ -251,8 +264,9 @@ class Simulation:
 
     def step(self) -> None:
         dt = self.config.dt
+        boundary = self.config.boundary_size
         for i, agent in enumerate(self.agents):
-            agent.update(self.agents, dt)
+            agent.update(self.agents, dt, boundary)
 
 
 def main():
@@ -261,29 +275,29 @@ def main():
         zoo=5.0,
         zoa=10.0,
         fov=270.0,
-        perception_radius=15.0,
-        speed=2.0,
+        perception_radius=10.0,
+        speed=4.0,
         turn_rate=30.0,
         noise_sd=5.0,
     )
     predator_config = AgentConfig(
-        zor=1.5,
-        zoo=6.0,
-        zoa=12.0,
-        fov=300.0,
+        zor=2.0,
+        zoo=10.0,
+        zoa=20.0,
+        fov=200.0,
         perception_radius=20.0,
-        speed=3.0,
-        turn_rate=40.0,
+        speed=4.5,
+        turn_rate=60.0,
         noise_sd=3.0,
     )
     sim_config = SimulationConfig(
-        dt=1.0,
-        total_time=100.0,
-        boundary_size=1000.0,
+        dt=0.1,
+        total_time=1000.0,
+        boundary_size=100.0,
         prey_config=prey_config,
         predator_config=predator_config,
-        prey_count=50,
-        predator_count=5,
+        prey_count=30,
+        predator_count=1,
     )
     sim = Simulation(config=sim_config)
     fig, ax = plt.subplots(figsize=(8, 8))
@@ -352,7 +366,7 @@ def main():
         ax.legend(loc="upper right")
 
     # 4. アニメーション実行
-    anim = FuncAnimation(
+    _ = FuncAnimation(
         fig,
         update,
         frames=int(sim_config.total_time / sim_config.dt),
