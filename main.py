@@ -116,7 +116,7 @@ class Agent:
         if zoo_peers or zoa_peers:
             d_o = self.v
             for peer in zoo_peers:
-                self.v += peer.v
+                d_o += peer.v
             d_o = normalize(d_o)
 
             d_a = np.zeros((2, 1), dtype=np.float64)
@@ -138,15 +138,16 @@ class Agent:
     def _in_fov(self, other: Agent) -> bool:
         direction_to_other = normalize(other.pos - self.pos)
         current_direction = normalize(self.v)
+        print((direction_to_other, current_direction))
 
-        dot_product = float(np.dot(current_direction.T, direction_to_other))
+        dot_product = np.dot(current_direction.T, direction_to_other).item()
         angle = np.arccos(np.clip(dot_product, -1.0, 1.0)) * (180.0 / np.pi)
 
         return angle <= (self.config.fov / 2)
 
     def _add_noise(self, direction: NDArray[np.float64]) -> NDArray[np.float64]:
-        noise = np.random.normal(0, 1, 2).reshape((2, 1))
-        noise = noise - np.dot(noise, direction)
+        noise = np.random.normal(0, 1, 2).reshape(2, 1)
+        noise = noise - np.dot(noise.T, direction)
         noise = normalize(noise)
 
         angle_error = np.random.normal(0, np.radians(self.config.noise_sd))
@@ -159,7 +160,7 @@ class Agent:
         direction = self._add_noise(direction)
         # 方向がturn_rateを超えている場合、directionを調整
         current_direction = normalize(self.v)
-        dot_product = float(np.dot(current_direction.T, direction))
+        dot_product = np.dot(current_direction.T, direction).item()
         angle = np.arccos(np.clip(dot_product, -1.0, 1.0)) * (180.0 / np.pi)
         if angle > self.config.turn_rate * dt:
             direction = current_direction * np.cos(
@@ -214,7 +215,7 @@ class Simulation:
     def __init__(self, config: SimulationConfig):
         self.agents = []
         self.config = config
-        self._add_agents
+        self._add_agents()
 
     def _add_agents(self):
         for _ in range(self.config.prey_count):
@@ -276,9 +277,9 @@ def main():
         noise_sd=3.0,
     )
     sim_config = SimulationConfig(
-        dt=0.1,
+        dt=1.0,
         total_time=100.0,
-        boundary_size=100.0,
+        boundary_size=1000.0,
         prey_config=prey_config,
         predator_config=predator_config,
         prey_count=50,
@@ -352,7 +353,11 @@ def main():
 
     # 4. アニメーション実行
     anim = FuncAnimation(
-        fig, update, frames=int(sim_config.total_time / sim_config.dt), interval=50
+        fig,
+        update,
+        frames=int(sim_config.total_time / sim_config.dt),
+        interval=50,
+        repeat=False,
     )
     plt.show()
 
