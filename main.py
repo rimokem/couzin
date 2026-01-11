@@ -183,25 +183,19 @@ class Agent:
         current_direction = normalize(self.v)
 
         dot_product = np.dot(current_direction.T, direction_to_other).item()
-        # 数値誤差対策でclipする
         angle = np.arccos(np.clip(dot_product, -1.0, 1.0)) * (180.0 / np.pi)
 
         return angle <= (self.config.fov / 2)
 
     def _get_wrapped_diff(self, other: Agent, boundary: float) -> NDArray[np.float64]:
-        """
-        周期的境界条件を考慮して、自分から相手への最短ベクトルを計算する。
-        """
         diff = other.pos - self.pos
         half_boundary = boundary / 2.0
 
-        # X軸の補正
         if diff[0, 0] > half_boundary:
             diff[0, 0] -= boundary
         elif diff[0, 0] < -half_boundary:
             diff[0, 0] += boundary
 
-        # Y軸の補正
         if diff[1, 0] > half_boundary:
             diff[1, 0] -= boundary
         elif diff[1, 0] < -half_boundary:
@@ -222,7 +216,6 @@ class Agent:
     def _move(self, agents: list[Agent], dt: float, boundary: float) -> None:
         direction = self._calc_direction(agents, boundary)
         direction = self._add_noise(direction)
-        # 方向がturn_rateを超えている場合、directionを調整
         current_direction = normalize(self.v)
         dot_product = np.dot(current_direction.T, direction).item()
         angle = np.arccos(np.clip(dot_product, -1.0, 1.0)) * (180.0 / np.pi)
@@ -241,8 +234,8 @@ class Agent:
 
 
 class SimulationConfig:
-    dt: float  # タイムステップ (s)
-    total_time: float  # 総シミュレーション時間 (s)
+    dt: float
+    total_time: float
     boundary_size: float
     prey_config: AgentConfig
     predator_config: AgentConfig
@@ -346,13 +339,7 @@ class Simulation:
         ]
 
 
-# --- 計測用関数 ---
-
-
 def measure_time_to_80_percent_reduction(config: SimulationConfig) -> float | None:
-    """
-    最初にロックオンしてから獲物が80%に減るまでの時間を計測
-    """
     sim = Simulation(config)
 
     first_lock_time: float | None = None
@@ -383,9 +370,6 @@ def measure_time_to_80_percent_reduction(config: SimulationConfig) -> float | No
 
 
 def measure_time_to_first_catch(config: SimulationConfig) -> float | None:
-    """
-    シミュレーション開始から、最初の獲物が捕食されるまでの時間を計測します。
-    """
     sim = Simulation(config)
     initial_prey_count = config.prey_count
     max_steps = int(config.total_time / config.dt)
@@ -396,7 +380,6 @@ def measure_time_to_first_catch(config: SimulationConfig) -> float | None:
 
         current_prey_count = len([a for a in sim.agents if a.type == AgentType.PREY])
 
-        # 獲物の数が初期値より減っていれば、捕食が発生したとみなす
         if current_prey_count < initial_prey_count:
             return current_time
 
@@ -404,9 +387,6 @@ def measure_time_to_first_catch(config: SimulationConfig) -> float | None:
 
 
 def benchmark_population_reduction(config: SimulationConfig, trials: int = 10):
-    """
-    個体数が80%に減少するまでの時間をベンチマーク
-    """
     results = []
     max_workers = 4
 
@@ -449,9 +429,6 @@ def benchmark_population_reduction(config: SimulationConfig, trials: int = 10):
 
 
 def benchmark_first_catch(config: SimulationConfig, trials: int = 10):
-    """
-    初回捕食までの時間をベンチマーク
-    """
     results = []
     max_workers = 4
 
@@ -496,9 +473,6 @@ def plot_first_catch_vs_prey_count(
     max_prey: int = 50,
     trials_per_count: int = 10,
 ):
-    """
-    preyの数を変化させたときの初回捕食時間の平均をプロットする
-    """
     prey_counts = list(range(min_prey, max_prey + 1))
     avg_times = []
     std_times = []
@@ -509,7 +483,6 @@ def plot_first_catch_vs_prey_count(
     for prey_count in prey_counts:
         print(f"Testing with {prey_count} prey...", end=" ")
 
-        # 設定を変更
         config = SimulationConfig(
             dt=base_config.dt,
             total_time=base_config.total_time,
@@ -521,7 +494,6 @@ def plot_first_catch_vs_prey_count(
             cathch_radius=base_config.catch_radius,
         )
 
-        # 並列実行
         results = []
         max_workers = 4
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -545,7 +517,6 @@ def plot_first_catch_vs_prey_count(
             std_times.append(np.nan)
             print("No successful trials")
 
-    # グラフ描画
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.errorbar(
         prey_counts,
@@ -573,9 +544,6 @@ def plot_population_reduction_vs_prey_count(
     max_prey: int = 50,
     trials_per_count: int = 10,
 ):
-    """
-    preyの数を変化させたときの80%減少までの時間の平均をプロットする
-    """
     prey_counts = list(range(min_prey, max_prey + 1))
     avg_times = []
     std_times = []
@@ -588,7 +556,6 @@ def plot_population_reduction_vs_prey_count(
     for prey_count in prey_counts:
         print(f"Testing with {prey_count} prey...", end=" ")
 
-        # 設定を変更
         config = SimulationConfig(
             dt=base_config.dt,
             total_time=base_config.total_time,
@@ -600,7 +567,6 @@ def plot_population_reduction_vs_prey_count(
             cathch_radius=base_config.catch_radius,
         )
 
-        # 並列実行
         results = []
         max_workers = 4
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -624,7 +590,6 @@ def plot_population_reduction_vs_prey_count(
             std_times.append(np.nan)
             print("No successful trials")
 
-    # グラフ描画
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.errorbar(
         prey_counts,
@@ -638,6 +603,90 @@ def plot_population_reduction_vs_prey_count(
     ax.set_xlabel("Number of Prey", fontsize=12)
     ax.set_ylabel("Time to 80% Reduction (s)", fontsize=12)
     ax.set_title("Time to 80% Population Reduction vs Prey Count", fontsize=14)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+    print("\n--- Plotting Complete ---")
+
+
+def plot_population_reduction_vs_zoo(
+    base_config: SimulationConfig,
+    min_zoo: float = 1.0,
+    max_zoo: float = 30.0,
+    step_zoo: float = 1.0,
+    trials_per_value: int = 10,
+):
+    zoo_values = np.arange(min_zoo, max_zoo + step_zoo, step_zoo)
+    avg_times = []
+    std_times = []
+
+    print(f"--- Plotting Time to 80% Reduction vs ZoO ({min_zoo} to {max_zoo}) ---")
+    print(f"Trials per ZoO value: {trials_per_value}\n")
+
+    for zoo in zoo_values:
+        print(f"Testing with ZoO = {zoo:.1f}...", end=" ")
+
+        modified_prey_config = AgentConfig(
+            zor=base_config.prey_config.zor,
+            zoo=zoo,
+            zoa=base_config.prey_config.zoa,
+            fov=base_config.prey_config.fov,
+            perception_radius=base_config.prey_config.perception_radius,
+            speed=base_config.prey_config.speed,
+            turn_rate=base_config.prey_config.turn_rate,
+            noise_sd=base_config.prey_config.noise_sd,
+            strategy=base_config.prey_config.strategy,
+        )
+
+        config = SimulationConfig(
+            dt=base_config.dt,
+            total_time=base_config.total_time,
+            boundary_size=base_config.boundary_size,
+            prey_config=modified_prey_config,
+            predator_config=base_config.predator_config,
+            prey_count=base_config.prey_count,
+            predator_count=base_config.predator_count,
+            cathch_radius=base_config.catch_radius,
+        )
+
+        results = []
+        max_workers = 4
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(measure_time_to_80_percent_reduction, config)
+                for _ in range(trials_per_value)
+            ]
+            for future in as_completed(futures):
+                duration = future.result()
+                if duration is not None:
+                    results.append(duration)
+
+        if results:
+            avg_time = statistics.mean(results)
+            std_time = statistics.stdev(results) if len(results) > 1 else 0.0
+            avg_times.append(avg_time)
+            std_times.append(std_time)
+            print(f"Avg: {avg_time:.2f}s (±{std_time:.2f}s)")
+        else:
+            avg_times.append(np.nan)
+            std_times.append(np.nan)
+            print("No successful trials")
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.errorbar(
+        zoo_values,
+        avg_times,
+        yerr=std_times,
+        marker="o",
+        linestyle="-",
+        capsize=5,
+        label="Average Time to 80% Reduction",
+    )
+    ax.set_xlabel("Zone of Orientation (ZoO)", fontsize=12)
+    ax.set_ylabel("Time to 80% Reduction (s)", fontsize=12)
+    ax.set_title("Time to 80% Population Reduction vs ZoO Parameter", fontsize=14)
     ax.grid(True, alpha=0.3)
     ax.legend()
     plt.tight_layout()
@@ -729,7 +778,7 @@ def run_visualization(config: SimulationConfig):
 def main():
     prey_config = AgentConfig(
         zor=1.0,
-        zoo=10.0,
+        zoo=1.1,
         zoa=20.0,
         fov=270.0,
         perception_radius=20.0,
@@ -755,8 +804,8 @@ def main():
         boundary_size=100.0,
         prey_config=prey_config,
         predator_config=predator_config,
-        prey_count=50,
-        predator_count=1,
+        prey_count=30,
+        predator_count=0,
         cathch_radius=1.0,
     )
 
@@ -766,8 +815,9 @@ def main():
     print("3: Run Benchmark (Time to First Catch)")
     print("4: Plot First Catch Time vs Prey Count")
     print("5: Plot Time to 80% Reduction vs Prey Count")
+    print("6: Plot Time to 80% Reduction vs ZoO Parameter")
 
-    mode = input("Enter 1, 2, 3, 4, or 5: ").strip()
+    mode = input("Enter 1, 2, 3, 4, 5, or 6: ").strip()
 
     if mode == "1":
         run_visualization(sim_config)
@@ -807,6 +857,20 @@ def main():
             max_prey = 50
             trials = 12
         plot_population_reduction_vs_prey_count(sim_config, min_prey, max_prey, trials)
+    elif mode == "6":
+        try:
+            min_zoo = float(input("Enter minimum ZoO (e.g., 1.0): ").strip())
+            max_zoo = float(input("Enter maximum ZoO (e.g., 20.0): ").strip())
+            step_zoo = float(input("Enter ZoO step size (e.g., 1.0): ").strip())
+            trials = int(
+                input("Enter number of trials per ZoO value (e.g., 10): ").strip()
+            )
+        except ValueError:
+            min_zoo = 1.0
+            max_zoo = 20.0
+            step_zoo = 1.0
+            trials = 12
+        plot_population_reduction_vs_zoo(sim_config, min_zoo, max_zoo, step_zoo, trials)
     else:
         print("Invalid selection.")
 
