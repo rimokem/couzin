@@ -106,7 +106,6 @@ class Agent:
         zor_peers: list[Agent] = []
         others: list[Agent] = []
 
-        self.target_id = None
         for agent in agents:
             if agent.id == self.id:
                 continue
@@ -114,12 +113,7 @@ class Agent:
             if self.type != agent.type:
                 if distance <= self.config.perception_radius:
                     if self._in_fov(agent, boundary):
-                        # others.append(agent)
-                        if others:
-                            if distance < self._calc_distance(others[0], boundary):
-                                others = [agent]
-                        else:
-                            others.append(agent)
+                        others.append(agent)
             else:
                 if distance <= self.config.zor:
                     zor_peers.append(agent)
@@ -131,9 +125,28 @@ class Agent:
                         zoa_peers.append(agent)
 
         if others:
-            target_agent = others[0]
+            others.sort(key=lambda a: self._calc_distance(a, boundary))
             if self.type is AgentType.PREDATOR:
+                if self.config.strategy == PredatorStrategy.CLOSEST:
+                    target_agent = others[0]
+                elif self.config.strategy == PredatorStrategy.CONFUSION:
+                    current_visible_ids = {a.id for a in others}
+                    new_entered_ids = current_visible_ids - self.previous_visible_ids
+                    self.previous_visible_ids = current_visible_ids
+                    if new_entered_ids:
+                        target_id = min(new_entered_ids)
+                        target_agent = next(a for a in others if a.id == target_id)
+                    else:
+                        if self.target_id in current_visible_ids:
+                            target_agent = next(
+                                a for a in others if a.id == self.target_id
+                            )
+                        else:
+                            target_agent = others[0]
+
                 self.target_id = target_agent.id
+                diff = self._get_wrapped_diff(target_agent, boundary)
+                return normalize(diff)
             else:
                 diff = np.zeros((2, 1), dtype=np.float64)
                 for other in others:
@@ -369,7 +382,7 @@ def run_headless_simulation(config: SimulationConfig) -> float | None:
         current_prey_count = len([a for a in sim.agents if a.type == AgentType.PREY])
 
         if first_lock_time is not None:
-            if current_prey_count <= initial_prey_count / 2:
+            if current_prey_count <= initial_prey_count * 0.8:
                 # 完了：経過時間を返す
                 return current_time - first_lock_time
 
@@ -418,7 +431,7 @@ def benchmark(config: SimulationConfig, trials: int = 10):
             stdev_time = 0.0
 
         print(f"Success Rate: {len(results)}/{trials}")
-        print(f"Average Time to Half Population (after 1st lock): {avg_time:.2f}s")
+        print(f"Average Time to 80% Population (after 1st lock): {avg_time:.2f}s")
         print(f"Standard Deviation: {stdev_time:.2f}s")
         print(f"Min: {min(results):.2f}s, Max: {max(results):.2f}s")
     else:
@@ -525,7 +538,7 @@ def main():
         zor=2.0,
         zoo=10.0,
         zoa=20.0,
-        fov=200.0,
+        fov=180.0,
         perception_radius=20.0,
         speed=7.0,
         turn_rate=60.0,
