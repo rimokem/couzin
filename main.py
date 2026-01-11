@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import statistics
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from enum import Enum
 
 import matplotlib.pyplot as plt
@@ -20,6 +23,11 @@ class AgentType(Enum):
     PREDATOR = 2
 
 
+class PredatorStrategy(Enum):
+    CLOSEST = 1
+    CONFUSION = 2
+
+
 class AgentConfig:
     zor: float  # Zone of Repulsion (斥力)
     zoo: float  # Zone of Orientation (整列)
@@ -27,11 +35,12 @@ class AgentConfig:
 
     fov: float  # 視野角 (度)
     perception_radius: float  # 異種個体・障害物の検知半径
-    wall_margin: float  # 壁からの距離の閾値
 
     speed: float  # 移動速度 (Units/s)
     turn_rate: float  # 最大回転速度 (deg/s)
     noise_sd: float  # ノイズの標準偏差 (度)
+
+    strategy: PredatorStrategy
 
     def __init__(
         self,
@@ -40,20 +49,20 @@ class AgentConfig:
         zoa: float,
         fov: float,
         perception_radius: float,
-        wall_margin: float,
         speed: float,
         turn_rate: float,
         noise_sd: float,
+        strategy: PredatorStrategy = PredatorStrategy.CLOSEST,
     ):
         self.zor = zor
         self.zoo = zoo
         self.zoa = zoa
         self.fov = fov
         self.perception_radius = perception_radius
-        self.wall_margin = wall_margin
         self.speed = speed
         self.turn_rate = turn_rate
         self.noise_sd = noise_sd
+        self.strategy = strategy
 
 
 class Agent:
@@ -63,6 +72,7 @@ class Agent:
     v: NDArray[np.float64]
     config: AgentConfig
     target_id: int | None
+    previous_visible_ids: set[int]
 
     def __init__(
         self,
@@ -83,6 +93,7 @@ class Agent:
             raise ValueError("`v` must be a (2,1) ndarray")
         self.config = config
         self.target_id = None
+        self.previous_visible_ids = set()
 
     def update(self, agents: list[Agent], dt: float, boundary: float) -> None:
         self._move(agents, dt, boundary)
@@ -123,14 +134,11 @@ class Agent:
             target_agent = others[0]
             if self.type is AgentType.PREDATOR:
                 self.target_id = target_agent.id
-
-            diff = np.zeros((2, 1), dtype=np.float64)
-            for other in others:
-                diff += self._get_wrapped_diff(other, boundary)
-            if self.type is AgentType.PREY:
-                return normalize(-diff)
-            elif self.type is AgentType.PREDATOR:
-                return normalize(diff)
+            else:
+                diff = np.zeros((2, 1), dtype=np.float64)
+                for other in others:
+                    diff += self._get_wrapped_diff(other, boundary)
+                    return normalize(-diff)
 
         if zor_peers:
             diff = np.zeros((2, 1), dtype=np.float64)
@@ -162,6 +170,7 @@ class Agent:
         current_direction = normalize(self.v)
 
         dot_product = np.dot(current_direction.T, direction_to_other).item()
+        # 数値誤差対策でclipする
         angle = np.arccos(np.clip(dot_product, -1.0, 1.0)) * (180.0 / np.pi)
 
         return angle <= (self.config.fov / 2)
@@ -174,11 +183,10 @@ class Agent:
         half_boundary = boundary / 2.0
 
         # X軸の補正
-        # 差が半分より大きい = 反対側から回ったほうが近い
         if diff[0, 0] > half_boundary:
-            diff[0, 0] -= boundary  # 右に行き過ぎなので、左側(マイナス)補正
+            diff[0, 0] -= boundary
         elif diff[0, 0] < -half_boundary:
-            diff[0, 0] += boundary  # 左に行き過ぎなので、右側(プラス)補正
+            diff[0, 0] += boundary
 
         # Y軸の補正
         if diff[1, 0] > half_boundary:
@@ -299,56 +307,25 @@ class Simulation:
 
         self._remove_eaten_prey()
 
-    def _remove_eaten_prey_all(self) -> None:
-        predators = [agent for agent in self.agents if agent.type == AgentType.PREDATOR]
-        prey = [agent for agent in self.agents if agent.type == AgentType.PREY]
-        remaining_prey = []
-        for p in prey:
-            eaten = False
-            for predator in predators:
-                distance = np.linalg.norm(predator.pos - p.pos)
-                if distance <= self.config.catch_radius:
-                    eaten = True
-                    break
-            if not eaten:
-                remaining_prey.append(p)
-        self.agents = predators + remaining_prey
-
     def _remove_eaten_prey(self) -> None:
-        """
-        捕食者が「現在ロックオンしている(target_id)」個体が
-        射程圏内にいる場合のみ削除する。
-        """
         predators = [a for a in self.agents if a.type == AgentType.PREDATOR]
-
-        # 現在生存しているPreyの辞書を作成 (ID検索を高速化するため)
         surviving_prey_map = {a.id: a for a in self.agents if a.type == AgentType.PREY}
-
-        # 削除対象となったPreyのIDを記録するセット
         eaten_prey_ids = set()
 
         for predator in predators:
-            # 誰も狙っていない場合はスキップ
             if predator.target_id is None:
                 continue
 
-            # 狙っている獲物がまだ生きているか確認
             target_prey = surviving_prey_map.get(predator.target_id)
-
-            # すでに他の捕食者に食べられている、または視界から消えている場合はスキップ
             if target_prey is None or target_prey.id in eaten_prey_ids:
-                predator.target_id = None  # ターゲットロスト
+                predator.target_id = None
                 continue
 
-            # 狙っている特定の個体との距離のみを判定
             dist = np.linalg.norm(target_prey.pos - predator.pos)
-
             if dist <= self.config.catch_radius:
-                # 捕食成功
                 eaten_prey_ids.add(target_prey.id)
-                predator.target_id = None  # 食べたのでターゲット解除
+                predator.target_id = None
 
-        # 最終的に生き残ったPreyだけを残す
         self.agents = [
             a
             for a in self.agents
@@ -356,52 +333,116 @@ class Simulation:
         ]
 
 
-def main():
-    prey_config = AgentConfig(
-        zor=1.0,
-        zoo=10.0,
-        zoa=20.0,
-        fov=270.0,
-        perception_radius=20.0,
-        speed=4.0,
-        turn_rate=30.0,
-        noise_sd=5.0,
-        wall_margin=5.0,
-    )
-    predator_config = AgentConfig(
-        zor=2.0,
-        zoo=10.0,
-        zoa=20.0,
-        fov=200.0,
-        perception_radius=20.0,
-        speed=4.5,
-        turn_rate=60.0,
-        noise_sd=3.0,
-        wall_margin=5.0,
-    )
-    sim_config = SimulationConfig(
-        dt=0.1,
-        total_time=500.0,
-        boundary_size=100.0,
-        prey_config=prey_config,
-        predator_config=predator_config,
-        prey_count=50,
-        predator_count=1,
-        cathch_radius=1.0,
-    )
-    sim = Simulation(config=sim_config)
+# --- 新しく追加した計測用関数 ---
+
+
+def run_headless_simulation(config: SimulationConfig) -> float | None:
+    """
+    動画生成を行わずにシミュレーションを実行し、
+    「最初に捕食者がターゲットをロックしてから、獲物が半減するまでの時間」
+    を返します。条件を満たさない場合は None を返します。
+    """
+    sim = Simulation(config)
+
+    first_lock_time: float | None = None
+    initial_prey_count = config.prey_count
+
+    max_steps = int(config.total_time / config.dt)
+
+    for step in range(max_steps):
+        current_time = step * config.dt
+
+        sim.step()
+
+        # 捕食者を取得（シミュレーションでは複数捕食者も想定されていますが、ここでは最初の1体または全体をチェック）
+        predators = [a for a in sim.agents if a.type == AgentType.PREDATOR]
+
+        # 1. 最初のロックオン時間を記録
+        if first_lock_time is None:
+            # いずれかの捕食者がターゲットを持っていればロックオンとみなす
+            for p in predators:
+                if p.target_id is not None:
+                    first_lock_time = current_time
+                    break
+
+        # 2. 獲物の数をチェック
+        current_prey_count = len([a for a in sim.agents if a.type == AgentType.PREY])
+
+        if first_lock_time is not None:
+            if current_prey_count <= initial_prey_count / 2:
+                # 完了：経過時間を返す
+                return current_time - first_lock_time
+
+    # 時間切れで達成できなかった場合
+    return None
+
+
+def benchmark(config: SimulationConfig, trials: int = 10):
+    """
+    ProcessPoolExecutorを使ってシミュレーションを並列実行します。
+    """
+    results = []
+    max_workers = 4
+
+    print(f"--- Benchmark Start: {trials} trials (Parallel: {max_workers} cores) ---")
+    start_cpu_time = time.time()
+
+    # ProcessPoolExecutorで並列処理
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # すべてのタスクを登録
+        futures = [
+            executor.submit(run_headless_simulation, config) for _ in range(trials)
+        ]
+
+        # 完了したものから順次処理（プログレス表示用）
+        completed_count = 0
+        for future in as_completed(futures):
+            completed_count += 1
+            duration = future.result()
+
+            print(f"Trial {completed_count}/{trials} finished.", end=" ")
+            if duration is not None:
+                results.append(duration)
+                print(f"Result: {duration:.2f}s")
+            else:
+                print("Result: Failed (Timeout)")
+
+    elapsed_cpu_time = time.time() - start_cpu_time
+    print(f"\n--- Benchmark Finished in {elapsed_cpu_time:.2f}s ---")
+
+    if results:
+        avg_time = statistics.mean(results)
+        if len(results) > 1:
+            stdev_time = statistics.stdev(results)
+        else:
+            stdev_time = 0.0
+
+        print(f"Success Rate: {len(results)}/{trials}")
+        print(f"Average Time to Half Population (after 1st lock): {avg_time:.2f}s")
+        print(f"Standard Deviation: {stdev_time:.2f}s")
+        print(f"Min: {min(results):.2f}s, Max: {max(results):.2f}s")
+    else:
+        print(
+            "No trials successfully reduced prey population to half within total_time."
+        )
+
+
+def run_visual_simulation(config: SimulationConfig):
+    """
+    既存の動画表示用ロジック
+    """
+    sim = Simulation(config=config)
     fig, ax = plt.subplots(figsize=(8, 8))
 
     def update(frame):
         sim.step()
 
-        ax.cla()  # 前のフレームをクリア
-        ax.set_xlim(0, sim_config.boundary_size)
-        ax.set_ylim(0, sim_config.boundary_size)
+        ax.cla()
+        ax.set_xlim(0, config.boundary_size)
+        ax.set_ylim(0, config.boundary_size)
         ax.set_aspect("equal")
-        ax.set_title(f"Time: {frame * sim_config.dt:.1f}s")
+        ax.set_title(f"Time: {frame * config.dt:.1f}s")
 
-        # データの抽出
         prey_pos = []
         prey_v = []
         pred_pos = []
@@ -415,13 +456,10 @@ def main():
                 pred_pos.append(agent.pos.flatten())
                 pred_v.append(agent.v.flatten())
 
-        # Preyの描画 (青い矢印)
         if prey_pos:
             prey_pos = np.array(prey_pos)
             prey_v = np.array(prey_v)
-            # 位置
             ax.scatter(prey_pos[:, 0], prey_pos[:, 1], c="blue", s=10, label="Prey")
-            # 向き（矢印）
             ax.quiver(
                 prey_pos[:, 0],
                 prey_pos[:, 1],
@@ -432,7 +470,6 @@ def main():
                 width=0.003,
             )
 
-        # Predatorの描画 (赤い大きな点と矢印)
         if pred_pos:
             pred_pos = np.array(pred_pos)
             pred_v = np.array(pred_v)
@@ -441,12 +478,11 @@ def main():
                 pred_pos[:, 1],
                 c="red",
                 s=30,
-                # marker="D",
                 label="Predator",
             )
             catch_circle = plt.Circle(
                 (pred_pos[0, 0], pred_pos[0, 1]),
-                sim_config.catch_radius,
+                config.catch_radius,
                 color="red",
                 fill=False,
                 linestyle="--",
@@ -464,15 +500,71 @@ def main():
 
         ax.legend(loc="upper right")
 
-    # 4. アニメーション実行
     _ = FuncAnimation(
         fig,
         update,
-        frames=int(sim_config.total_time / sim_config.dt),
+        frames=int(config.total_time / config.dt),
         interval=50,
         repeat=False,
     )
     plt.show()
+
+
+def main():
+    prey_config = AgentConfig(
+        zor=1.0,
+        zoo=10.0,
+        zoa=20.0,
+        fov=270.0,
+        perception_radius=20.0,
+        speed=4.0,
+        turn_rate=30.0,
+        noise_sd=5.0,
+    )
+    predator_config = AgentConfig(
+        zor=2.0,
+        zoo=10.0,
+        zoa=20.0,
+        fov=200.0,
+        perception_radius=20.0,
+        speed=7.0,
+        turn_rate=60.0,
+        noise_sd=3.0,
+        strategy=PredatorStrategy.CLOSEST,
+    )
+
+    # シミュレーション設定
+    # ※ ベンチマーク時は total_time 内に終わらないと None になります
+    sim_config = SimulationConfig(
+        dt=0.1,
+        total_time=1000.0,  # 時間切れを防ぐため少し長めに設定
+        boundary_size=100.0,
+        prey_config=prey_config,
+        predator_config=predator_config,
+        prey_count=50,
+        predator_count=1,
+        cathch_radius=1.0,
+    )
+
+    # モード選択
+    print("Select Mode:")
+    print("1: Run Visualization (Original)")
+    print("2: Run Benchmark (Measure time to reduce population by half)")
+
+    # ユーザー入力を待つか、ここで直接指定するか選択してください。
+    # ここでは例として入力を求めます。
+    mode = input("Enter 1 or 2: ").strip()
+
+    if mode == "1":
+        run_visual_simulation(sim_config)
+    elif mode == "2":
+        try:
+            trials = int(input("Enter number of trials (e.g., 10): ").strip())
+        except ValueError:
+            trials = 10
+        benchmark(sim_config, trials=trials)
+    else:
+        print("Invalid selection.")
 
 
 if __name__ == "__main__":
