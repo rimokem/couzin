@@ -27,6 +27,7 @@ class AgentConfig:
 
     fov: float  # 視野角 (度)
     perception_radius: float  # 異種個体・障害物の検知半径
+    wall_margin: float  # 壁からの距離の閾値
 
     speed: float  # 移動速度 (Units/s)
     turn_rate: float  # 最大回転速度 (deg/s)
@@ -39,6 +40,7 @@ class AgentConfig:
         zoa: float,
         fov: float,
         perception_radius: float,
+        wall_margin: float,
         speed: float,
         turn_rate: float,
         noise_sd: float,
@@ -48,6 +50,7 @@ class AgentConfig:
         self.zoa = zoa
         self.fov = fov
         self.perception_radius = perception_radius
+        self.wall_margin = wall_margin
         self.speed = speed
         self.turn_rate = turn_rate
         self.noise_sd = noise_sd
@@ -59,6 +62,7 @@ class Agent:
     pos: NDArray[np.float64]
     v: NDArray[np.float64]
     config: AgentConfig
+    target_id: int | None
 
     def __init__(
         self,
@@ -78,37 +82,51 @@ class Agent:
         if self.v.shape != (2, 1):
             raise ValueError("`v` must be a (2,1) ndarray")
         self.config = config
+        self.target_id = None
 
     def update(self, agents: list[Agent], dt: float, boundary: float) -> None:
         self._move(agents, dt, boundary)
 
-    def _calc_direction(self, agents: list[Agent]) -> NDArray[np.float64]:
+    def _calc_direction(
+        self, agents: list[Agent], boundary: float
+    ) -> NDArray[np.float64]:
         zoa_peers: list[Agent] = []
         zoo_peers: list[Agent] = []
         zor_peers: list[Agent] = []
         others: list[Agent] = []
+
+        self.target_id = None
         for agent in agents:
             if agent.id == self.id:
                 continue
-            distance = self._calc_distance(agent)
+            distance = self._calc_distance(agent, boundary)
             if self.type != agent.type:
                 if distance <= self.config.perception_radius:
-                    if self._in_fov(agent):
-                        others.append(agent)
+                    if self._in_fov(agent, boundary):
+                        # others.append(agent)
+                        if others:
+                            if distance < self._calc_distance(others[0], boundary):
+                                others = [agent]
+                        else:
+                            others.append(agent)
             else:
                 if distance <= self.config.zor:
                     zor_peers.append(agent)
                 elif distance <= self.config.zoo:
-                    if self._in_fov(agent):
+                    if self._in_fov(agent, boundary):
                         zoo_peers.append(agent)
                 elif distance <= self.config.zoa:
-                    if self._in_fov(agent):
+                    if self._in_fov(agent, boundary):
                         zoa_peers.append(agent)
 
         if others:
+            target_agent = others[0]
+            if self.type is AgentType.PREDATOR:
+                self.target_id = target_agent.id
+
             diff = np.zeros((2, 1), dtype=np.float64)
             for other in others:
-                diff += other.pos - self.pos
+                diff += self._get_wrapped_diff(other, boundary)
             if self.type is AgentType.PREY:
                 return normalize(-diff)
             elif self.type is AgentType.PREDATOR:
@@ -117,7 +135,7 @@ class Agent:
         if zor_peers:
             diff = np.zeros((2, 1), dtype=np.float64)
             for peer in zor_peers:
-                diff += peer.pos - self.pos
+                diff += self._get_wrapped_diff(peer, boundary)
             return normalize(-diff)
 
         if zoo_peers or zoa_peers:
@@ -128,28 +146,47 @@ class Agent:
 
             d_a = np.zeros((2, 1), dtype=np.float64)
             for peer in zoa_peers:
-                d_a += peer.pos - self.pos
+                d_a += self._get_wrapped_diff(peer, boundary)
             d_a = normalize(d_a)
 
-            if zoa_peers:
-                return normalize(d_o + d_a)
-            else:
-                return d_o
+            return normalize(d_o + d_a)
 
         return normalize(self.v)
 
-    def _calc_distance(self, other: Agent) -> float:
-        diff = other.pos - self.pos
+    def _calc_distance(self, other: Agent, boundary: float) -> float:
+        diff = self._get_wrapped_diff(other, boundary)
         return float(np.linalg.norm(diff))
 
-    def _in_fov(self, other: Agent) -> bool:
-        direction_to_other = normalize(other.pos - self.pos)
+    def _in_fov(self, other: Agent, boundary: float) -> bool:
+        direction_to_other = normalize(self._get_wrapped_diff(other, boundary))
         current_direction = normalize(self.v)
 
         dot_product = np.dot(current_direction.T, direction_to_other).item()
         angle = np.arccos(np.clip(dot_product, -1.0, 1.0)) * (180.0 / np.pi)
 
         return angle <= (self.config.fov / 2)
+
+    def _get_wrapped_diff(self, other: Agent, boundary: float) -> NDArray[np.float64]:
+        """
+        周期的境界条件を考慮して、自分から相手への最短ベクトルを計算する。
+        """
+        diff = other.pos - self.pos
+        half_boundary = boundary / 2.0
+
+        # X軸の補正
+        # 差が半分より大きい = 反対側から回ったほうが近い
+        if diff[0, 0] > half_boundary:
+            diff[0, 0] -= boundary  # 右に行き過ぎなので、左側(マイナス)補正
+        elif diff[0, 0] < -half_boundary:
+            diff[0, 0] += boundary  # 左に行き過ぎなので、右側(プラス)補正
+
+        # Y軸の補正
+        if diff[1, 0] > half_boundary:
+            diff[1, 0] -= boundary
+        elif diff[1, 0] < -half_boundary:
+            diff[1, 0] += boundary
+
+        return diff
 
     def _add_noise(self, direction: NDArray[np.float64]) -> NDArray[np.float64]:
         noise = np.random.normal(0, 1, 2).reshape(2, 1)
@@ -162,7 +199,7 @@ class Agent:
         return normalize(new_direction)
 
     def _move(self, agents: list[Agent], dt: float, boundary: float) -> None:
-        direction = self._calc_direction(agents)
+        direction = self._calc_direction(agents, boundary)
         direction = self._add_noise(direction)
         # 方向がturn_rateを超えている場合、directionを調整
         current_direction = normalize(self.v)
@@ -178,19 +215,8 @@ class Agent:
         self.v = direction * self.config.speed
         self.pos += self.v * dt
 
-        if self.pos[0, 0] < 0:
-            self.pos[0, 0] = 0
-            self.v[0, 0] *= -1
-        elif self.pos[0, 0] > boundary:
-            self.pos[0, 0] = boundary
-            self.v[0, 0] *= -1
-
-        if self.pos[1, 0] < 0:
-            self.pos[1, 0] = 0
-            self.v[1, 0] *= -1
-        elif self.pos[1, 0] > boundary:
-            self.pos[1, 0] = boundary
-            self.v[1, 0] *= -1
+        self.pos[0, 0] = self.pos[0, 0] % boundary
+        self.pos[1, 0] = self.pos[1, 0] % boundary
 
 
 class SimulationConfig:
@@ -201,6 +227,7 @@ class SimulationConfig:
     predator_config: AgentConfig
     prey_count: int
     predator_count: int
+    catch_radius: float
 
     def __init__(
         self,
@@ -211,6 +238,7 @@ class SimulationConfig:
         predator_config: AgentConfig,
         prey_count: int,
         predator_count: int,
+        cathch_radius: float,
     ):
         self.dt = dt
         self.total_time = total_time
@@ -219,6 +247,7 @@ class SimulationConfig:
         self.predator_config = predator_config
         self.prey_count = prey_count
         self.predator_count = predator_count
+        self.catch_radius = cathch_radius
 
 
 class Simulation:
@@ -232,7 +261,7 @@ class Simulation:
 
     def _add_agents(self):
         for _ in range(self.config.prey_count):
-            pos = np.random.rand(2, 1) * self.config.boundary_size * 0.25
+            pos = (np.random.rand(2, 1) * 0.2 + 0.5) * self.config.boundary_size
             angle = np.random.rand() * 2 * np.pi
             v = (
                 np.array([[np.cos(angle)], [np.sin(angle)]])
@@ -247,7 +276,7 @@ class Simulation:
             )
             self.agents.append(agent)
         for _ in range(self.config.predator_count):
-            pos = (np.random.rand(2, 1) * 0.3 + 0.7) * self.config.boundary_size
+            pos = np.random.rand(2, 1) * self.config.boundary_size * 0.25
             angle = np.random.rand() * 2 * np.pi
             v = (
                 np.array([[np.cos(angle)], [np.sin(angle)]])
@@ -268,17 +297,76 @@ class Simulation:
         for i, agent in enumerate(self.agents):
             agent.update(self.agents, dt, boundary)
 
+        self._remove_eaten_prey()
+
+    def _remove_eaten_prey_all(self) -> None:
+        predators = [agent for agent in self.agents if agent.type == AgentType.PREDATOR]
+        prey = [agent for agent in self.agents if agent.type == AgentType.PREY]
+        remaining_prey = []
+        for p in prey:
+            eaten = False
+            for predator in predators:
+                distance = np.linalg.norm(predator.pos - p.pos)
+                if distance <= self.config.catch_radius:
+                    eaten = True
+                    break
+            if not eaten:
+                remaining_prey.append(p)
+        self.agents = predators + remaining_prey
+
+    def _remove_eaten_prey(self) -> None:
+        """
+        捕食者が「現在ロックオンしている(target_id)」個体が
+        射程圏内にいる場合のみ削除する。
+        """
+        predators = [a for a in self.agents if a.type == AgentType.PREDATOR]
+
+        # 現在生存しているPreyの辞書を作成 (ID検索を高速化するため)
+        surviving_prey_map = {a.id: a for a in self.agents if a.type == AgentType.PREY}
+
+        # 削除対象となったPreyのIDを記録するセット
+        eaten_prey_ids = set()
+
+        for predator in predators:
+            # 誰も狙っていない場合はスキップ
+            if predator.target_id is None:
+                continue
+
+            # 狙っている獲物がまだ生きているか確認
+            target_prey = surviving_prey_map.get(predator.target_id)
+
+            # すでに他の捕食者に食べられている、または視界から消えている場合はスキップ
+            if target_prey is None or target_prey.id in eaten_prey_ids:
+                predator.target_id = None  # ターゲットロスト
+                continue
+
+            # 狙っている特定の個体との距離のみを判定
+            dist = np.linalg.norm(target_prey.pos - predator.pos)
+
+            if dist <= self.config.catch_radius:
+                # 捕食成功
+                eaten_prey_ids.add(target_prey.id)
+                predator.target_id = None  # 食べたのでターゲット解除
+
+        # 最終的に生き残ったPreyだけを残す
+        self.agents = [
+            a
+            for a in self.agents
+            if (a.type == AgentType.PREDATOR) or (a.id not in eaten_prey_ids)
+        ]
+
 
 def main():
     prey_config = AgentConfig(
         zor=1.0,
-        zoo=5.0,
-        zoa=10.0,
+        zoo=10.0,
+        zoa=20.0,
         fov=270.0,
-        perception_radius=10.0,
+        perception_radius=20.0,
         speed=4.0,
         turn_rate=30.0,
         noise_sd=5.0,
+        wall_margin=5.0,
     )
     predator_config = AgentConfig(
         zor=2.0,
@@ -289,15 +377,17 @@ def main():
         speed=4.5,
         turn_rate=60.0,
         noise_sd=3.0,
+        wall_margin=5.0,
     )
     sim_config = SimulationConfig(
         dt=0.1,
-        total_time=1000.0,
+        total_time=500.0,
         boundary_size=100.0,
         prey_config=prey_config,
         predator_config=predator_config,
-        prey_count=30,
+        prey_count=50,
         predator_count=1,
+        cathch_radius=1.0,
     )
     sim = Simulation(config=sim_config)
     fig, ax = plt.subplots(figsize=(8, 8))
@@ -350,10 +440,19 @@ def main():
                 pred_pos[:, 0],
                 pred_pos[:, 1],
                 c="red",
-                s=50,
-                marker="D",
+                s=30,
+                # marker="D",
                 label="Predator",
             )
+            catch_circle = plt.Circle(
+                (pred_pos[0, 0], pred_pos[0, 1]),
+                sim_config.catch_radius,
+                color="red",
+                fill=False,
+                linestyle="--",
+                alpha=0.5,
+            )
+            ax.add_artist(catch_circle)
             ax.quiver(
                 pred_pos[:, 0],
                 pred_pos[:, 1],
