@@ -346,14 +346,12 @@ class Simulation:
         ]
 
 
-# --- 新しく追加した計測用関数 ---
+# --- 計測用関数 ---
 
 
-def run_headless_simulation(config: SimulationConfig) -> float | None:
+def measure_time_to_80_percent_reduction(config: SimulationConfig) -> float | None:
     """
-    動画生成を行わずにシミュレーションを実行し、
-    「最初に捕食者がターゲットをロックしてから、獲物が半減するまでの時間」
-    を返します。条件を満たさない場合は None を返します。
+    最初にロックオンしてから獲物が80%に減るまでの時間を計測
     """
     sim = Simulation(config)
 
@@ -367,47 +365,62 @@ def run_headless_simulation(config: SimulationConfig) -> float | None:
 
         sim.step()
 
-        # 捕食者を取得（シミュレーションでは複数捕食者も想定されていますが、ここでは最初の1体または全体をチェック）
         predators = [a for a in sim.agents if a.type == AgentType.PREDATOR]
 
-        # 1. 最初のロックオン時間を記録
         if first_lock_time is None:
-            # いずれかの捕食者がターゲットを持っていればロックオンとみなす
             for p in predators:
                 if p.target_id is not None:
                     first_lock_time = current_time
                     break
 
-        # 2. 獲物の数をチェック
         current_prey_count = len([a for a in sim.agents if a.type == AgentType.PREY])
 
         if first_lock_time is not None:
             if current_prey_count <= initial_prey_count * 0.8:
-                # 完了：経過時間を返す
                 return current_time - first_lock_time
 
-    # 時間切れで達成できなかった場合
     return None
 
 
-def benchmark(config: SimulationConfig, trials: int = 10):
+def measure_time_to_first_catch(config: SimulationConfig) -> float | None:
     """
-    ProcessPoolExecutorを使ってシミュレーションを並列実行します。
+    シミュレーション開始から、最初の獲物が捕食されるまでの時間を計測します。
+    """
+    sim = Simulation(config)
+    initial_prey_count = config.prey_count
+    max_steps = int(config.total_time / config.dt)
+
+    for step in range(max_steps):
+        current_time = step * config.dt
+        sim.step()
+
+        current_prey_count = len([a for a in sim.agents if a.type == AgentType.PREY])
+
+        # 獲物の数が初期値より減っていれば、捕食が発生したとみなす
+        if current_prey_count < initial_prey_count:
+            return current_time
+
+    return None
+
+
+def benchmark_population_reduction(config: SimulationConfig, trials: int = 10):
+    """
+    個体数が80%に減少するまでの時間をベンチマーク
     """
     results = []
     max_workers = 4
 
-    print(f"--- Benchmark Start: {trials} trials (Parallel: {max_workers} cores) ---")
+    print(
+        f"--- Benchmark (Reduction to 80%): {trials} trials (Parallel: {max_workers} cores) ---"
+    )
     start_cpu_time = time.time()
 
-    # ProcessPoolExecutorで並列処理
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # すべてのタスクを登録
         futures = [
-            executor.submit(run_headless_simulation, config) for _ in range(trials)
+            executor.submit(measure_time_to_80_percent_reduction, config)
+            for _ in range(trials)
         ]
 
-        # 完了したものから順次処理（プログレス表示用）
         completed_count = 0
         for future in as_completed(futures):
             completed_count += 1
@@ -425,25 +438,215 @@ def benchmark(config: SimulationConfig, trials: int = 10):
 
     if results:
         avg_time = statistics.mean(results)
-        if len(results) > 1:
-            stdev_time = statistics.stdev(results)
-        else:
-            stdev_time = 0.0
+        stdev_time = statistics.stdev(results) if len(results) > 1 else 0.0
 
         print(f"Success Rate: {len(results)}/{trials}")
-        print(f"Average Time to 80% Population (after 1st lock): {avg_time:.2f}s")
+        print(f"Average Time: {avg_time:.2f}s")
         print(f"Standard Deviation: {stdev_time:.2f}s")
         print(f"Min: {min(results):.2f}s, Max: {max(results):.2f}s")
     else:
-        print(
-            "No trials successfully reduced prey population to half within total_time."
+        print("No trials successful.")
+
+
+def benchmark_first_catch(config: SimulationConfig, trials: int = 10):
+    """
+    初回捕食までの時間をベンチマーク
+    """
+    results = []
+    max_workers = 4
+
+    print(f"--- Benchmark (Time to First Catch): {trials} trials ---")
+    start_cpu_time = time.time()
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(measure_time_to_first_catch, config) for _ in range(trials)
+        ]
+
+        completed_count = 0
+        for future in as_completed(futures):
+            completed_count += 1
+            duration = future.result()
+
+            print(f"Trial {completed_count}/{trials} finished.", end=" ")
+            if duration is not None:
+                results.append(duration)
+                print(f"Result: {duration:.2f}s")
+            else:
+                print("Result: Failed (Timeout or No Catch)")
+
+    elapsed_cpu_time = time.time() - start_cpu_time
+    print(f"\n--- Benchmark Finished in {elapsed_cpu_time:.2f}s ---")
+
+    if results:
+        avg_time = statistics.mean(results)
+        stdev_time = statistics.stdev(results) if len(results) > 1 else 0.0
+
+        print(f"Success Rate: {len(results)}/{trials}")
+        print(f"Average Time to First Catch: {avg_time:.2f}s")
+        print(f"Standard Deviation: {stdev_time:.2f}s")
+        print(f"Min: {min(results):.2f}s, Max: {max(results):.2f}s")
+    else:
+        print("No prey was caught in any trial.")
+
+
+def plot_first_catch_vs_prey_count(
+    base_config: SimulationConfig,
+    min_prey: int = 1,
+    max_prey: int = 50,
+    trials_per_count: int = 10,
+):
+    """
+    preyの数を変化させたときの初回捕食時間の平均をプロットする
+    """
+    prey_counts = list(range(min_prey, max_prey + 1))
+    avg_times = []
+    std_times = []
+
+    print(f"--- Plotting First Catch Time vs Prey Count ({min_prey} to {max_prey}) ---")
+    print(f"Trials per prey count: {trials_per_count}\n")
+
+    for prey_count in prey_counts:
+        print(f"Testing with {prey_count} prey...", end=" ")
+
+        # 設定を変更
+        config = SimulationConfig(
+            dt=base_config.dt,
+            total_time=base_config.total_time,
+            boundary_size=base_config.boundary_size,
+            prey_config=base_config.prey_config,
+            predator_config=base_config.predator_config,
+            prey_count=prey_count,
+            predator_count=base_config.predator_count,
+            cathch_radius=base_config.catch_radius,
         )
 
+        # 並列実行
+        results = []
+        max_workers = 4
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(measure_time_to_first_catch, config)
+                for _ in range(trials_per_count)
+            ]
+            for future in as_completed(futures):
+                duration = future.result()
+                if duration is not None:
+                    results.append(duration)
 
-def run_visual_simulation(config: SimulationConfig):
+        if results:
+            avg_time = statistics.mean(results)
+            std_time = statistics.stdev(results) if len(results) > 1 else 0.0
+            avg_times.append(avg_time)
+            std_times.append(std_time)
+            print(f"Avg: {avg_time:.2f}s (±{std_time:.2f}s)")
+        else:
+            avg_times.append(np.nan)
+            std_times.append(np.nan)
+            print("No successful trials")
+
+    # グラフ描画
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.errorbar(
+        prey_counts,
+        avg_times,
+        yerr=std_times,
+        marker="o",
+        linestyle="-",
+        capsize=5,
+        label="Average Time to First Catch",
+    )
+    ax.set_xlabel("Number of Prey", fontsize=12)
+    ax.set_ylabel("Time to First Catch (s)", fontsize=12)
+    ax.set_title("Time to First Catch vs Prey Count", fontsize=14)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+    print("\n--- Plotting Complete ---")
+
+
+def plot_population_reduction_vs_prey_count(
+    base_config: SimulationConfig,
+    min_prey: int = 1,
+    max_prey: int = 50,
+    trials_per_count: int = 10,
+):
     """
-    既存の動画表示用ロジック
+    preyの数を変化させたときの80%減少までの時間の平均をプロットする
     """
+    prey_counts = list(range(min_prey, max_prey + 1))
+    avg_times = []
+    std_times = []
+
+    print(
+        f"--- Plotting Time to 80% Reduction vs Prey Count ({min_prey} to {max_prey}) ---"
+    )
+    print(f"Trials per prey count: {trials_per_count}\n")
+
+    for prey_count in prey_counts:
+        print(f"Testing with {prey_count} prey...", end=" ")
+
+        # 設定を変更
+        config = SimulationConfig(
+            dt=base_config.dt,
+            total_time=base_config.total_time,
+            boundary_size=base_config.boundary_size,
+            prey_config=base_config.prey_config,
+            predator_config=base_config.predator_config,
+            prey_count=prey_count,
+            predator_count=base_config.predator_count,
+            cathch_radius=base_config.catch_radius,
+        )
+
+        # 並列実行
+        results = []
+        max_workers = 4
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(measure_time_to_80_percent_reduction, config)
+                for _ in range(trials_per_count)
+            ]
+            for future in as_completed(futures):
+                duration = future.result()
+                if duration is not None:
+                    results.append(duration)
+
+        if results:
+            avg_time = statistics.mean(results)
+            std_time = statistics.stdev(results) if len(results) > 1 else 0.0
+            avg_times.append(avg_time)
+            std_times.append(std_time)
+            print(f"Avg: {avg_time:.2f}s (±{std_time:.2f}s)")
+        else:
+            avg_times.append(np.nan)
+            std_times.append(np.nan)
+            print("No successful trials")
+
+    # グラフ描画
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.errorbar(
+        prey_counts,
+        avg_times,
+        yerr=std_times,
+        marker="o",
+        linestyle="-",
+        capsize=5,
+        label="Average Time to 80% Reduction",
+    )
+    ax.set_xlabel("Number of Prey", fontsize=12)
+    ax.set_ylabel("Time to 80% Reduction (s)", fontsize=12)
+    ax.set_title("Time to 80% Population Reduction vs Prey Count", fontsize=14)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+    print("\n--- Plotting Complete ---")
+
+
+def run_visualization(config: SimulationConfig):
     sim = Simulation(config=config)
     fig, ax = plt.subplots(figsize=(8, 8))
 
@@ -543,14 +746,12 @@ def main():
         speed=7.0,
         turn_rate=60.0,
         noise_sd=3.0,
-        strategy=PredatorStrategy.CLOSEST,
+        strategy=PredatorStrategy.CONFUSION,
     )
 
-    # シミュレーション設定
-    # ※ ベンチマーク時は total_time 内に終わらないと None になります
     sim_config = SimulationConfig(
         dt=0.1,
-        total_time=1000.0,  # 時間切れを防ぐため少し長めに設定
+        total_time=1000.0,
         boundary_size=100.0,
         prey_config=prey_config,
         predator_config=predator_config,
@@ -559,23 +760,53 @@ def main():
         cathch_radius=1.0,
     )
 
-    # モード選択
     print("Select Mode:")
-    print("1: Run Visualization (Original)")
-    print("2: Run Benchmark (Measure time to reduce population by half)")
+    print("1: Run Visualization")
+    print("2: Run Benchmark (Population Reduction to 80%)")
+    print("3: Run Benchmark (Time to First Catch)")
+    print("4: Plot First Catch Time vs Prey Count")
+    print("5: Plot Time to 80% Reduction vs Prey Count")
 
-    # ユーザー入力を待つか、ここで直接指定するか選択してください。
-    # ここでは例として入力を求めます。
-    mode = input("Enter 1 or 2: ").strip()
+    mode = input("Enter 1, 2, 3, 4, or 5: ").strip()
 
     if mode == "1":
-        run_visual_simulation(sim_config)
+        run_visualization(sim_config)
     elif mode == "2":
         try:
             trials = int(input("Enter number of trials (e.g., 10): ").strip())
         except ValueError:
             trials = 10
-        benchmark(sim_config, trials=trials)
+        benchmark_population_reduction(sim_config, trials=trials)
+    elif mode == "3":
+        try:
+            trials = int(input("Enter number of trials (e.g., 10): ").strip())
+        except ValueError:
+            trials = 10
+        benchmark_first_catch(sim_config, trials=trials)
+    elif mode == "4":
+        try:
+            min_prey = int(input("Enter minimum prey count (e.g., 1): ").strip())
+            max_prey = int(input("Enter maximum prey count (e.g., 50): ").strip())
+            trials = int(
+                input("Enter number of trials per prey count (e.g., 10): ").strip()
+            )
+        except ValueError:
+            min_prey = 1
+            max_prey = 50
+            trials = 12
+        plot_first_catch_vs_prey_count(sim_config, min_prey, max_prey, trials)
+    elif mode == "5":
+        try:
+            min_prey = int(input("Enter minimum prey count (e.g., 1): ").strip())
+            max_prey = int(input("Enter maximum prey count (e.g., 50): ").strip())
+            trials = int(
+                input("Enter number of trials per prey count (e.g., 10): ").strip()
+            )
+        except ValueError:
+            min_prey = 1
+            max_prey = 50
+            trials = 12
+        plot_population_reduction_vs_prey_count(sim_config, min_prey, max_prey, trials)
     else:
         print("Invalid selection.")
 
